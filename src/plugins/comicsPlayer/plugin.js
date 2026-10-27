@@ -13,6 +13,7 @@ import * as userSettings from '../../scripts/settings/userSettings';
 import BookOsd from '../bookPlayer/BookOsd/BookOsd';
 import Events from '../../utils/events.ts';
 import { renderComponent } from '../../utils/reactUtils';
+import { PageZoom } from './PageZoom';
 
 import 'material-design-icons-iconfont';
 import './style.scss';
@@ -38,6 +39,12 @@ export class ComicsPlayer {
         this.onDialogClosed = this.onDialogClosed.bind(this);
         this.onWindowKeyDown = this.onWindowKeyDown.bind(this);
         this.toggleFullscreen = this.toggleFullscreen.bind(this);
+        this.onWheel = this.onWheel.bind(this);
+        this.onPointerDown = this.onPointerDown.bind(this);
+        this.onPointerMove = this.onPointerMove.bind(this);
+        this.onPointerUp = this.onPointerUp.bind(this);
+        this.onDoubleClick = this.onDoubleClick.bind(this);
+        this.onResize = this.onResize.bind(this);
     }
 
     play(options) {
@@ -66,6 +73,8 @@ export class ComicsPlayer {
         const mediaSourceId = this.item.Id;
         userSettings.setComicsPlayerSettings(this.comicsPlayerSettings, mediaSourceId);
 
+        this.pageZoom?.destroy();
+        this.pageZoom = null;
         this.archiveSource?.release();
 
         const elem = this.mediaElement;
@@ -176,28 +185,133 @@ export class ComicsPlayer {
     }
 
     onWindowKeyDown(e) {
+        const key = keyboardnavigation.getKeyName(e);
+
+        // Ctrl (Cmd on a Mac) + 0 shows the whole page again
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && key === 'Digit0') {
+            e.preventDefault();
+            this.pageZoom?.close();
+            return;
+        }
+
         // Skip modified keys
         if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
 
-        const key = keyboardnavigation.getKeyName(e);
-        if (key === 'Escape') {
-            e.preventDefault();
-            this.stop();
+        const rtl = this.comicsPlayerSettings.langDir === 'rtl';
+        switch (key) {
+            case 'Escape':
+                e.preventDefault();
+                if (this.pageZoom?.active) {
+                    this.pageZoom.close();
+                } else {
+                    this.stop();
+                }
+                break;
+            case 'ArrowRight':
+                e.preventDefault();
+                rtl ? this.previous() : this.next();
+                break;
+            case 'ArrowLeft':
+                e.preventDefault();
+                rtl ? this.next() : this.previous();
+                break;
+            case 'PageDown':
+                e.preventDefault();
+                this.next();
+                break;
+            case 'PageUp':
+                e.preventDefault();
+                this.previous();
+                break;
+            case 'KeyM':
+                this.toggleZoom();
+                break;
         }
     }
 
     bindEvents() {
         this.mediaElement?.addEventListener('close', this.onDialogClosed, { once: true });
         document.addEventListener('keydown', this.onWindowKeyDown);
+        window.addEventListener('resize', this.onResize);
     }
 
     unbindEvents() {
         this.mediaElement?.removeEventListener('close', this.onDialogClosed);
         document.removeEventListener('keydown', this.onWindowKeyDown);
+        window.removeEventListener('resize', this.onResize);
+        this.unbindZoomEvents();
+    }
+
+    bindZoomEvents(container) {
+        this.zoomContainer = container;
+        container.addEventListener('wheel', this.onWheel, { passive: false });
+        // capture, so a pinch is seen before the swiper starts a swipe
+        container.addEventListener('pointerdown', this.onPointerDown, true);
+        container.addEventListener('pointermove', this.onPointerMove);
+        container.addEventListener('pointerup', this.onPointerUp);
+        container.addEventListener('pointercancel', this.onPointerUp);
+        container.addEventListener('dblclick', this.onDoubleClick);
+    }
+
+    unbindZoomEvents() {
+        const container = this.zoomContainer;
+        if (!container) return;
+        container.removeEventListener('wheel', this.onWheel);
+        container.removeEventListener('pointerdown', this.onPointerDown, true);
+        container.removeEventListener('pointermove', this.onPointerMove);
+        container.removeEventListener('pointerup', this.onPointerUp);
+        container.removeEventListener('pointercancel', this.onPointerUp);
+        container.removeEventListener('dblclick', this.onDoubleClick);
+        this.zoomContainer = null;
+    }
+
+    currentPageUrl() {
+        return this.archiveSource?.urls[this.currentPage];
+    }
+
+    onWheel(e) {
+        if (this.swiperInstance) this.pageZoom?.onWheel(e, this.currentPageUrl());
+    }
+
+    onPointerDown(e) {
+        if (!this.swiperInstance || !this.pageZoom?.onPointerDown(e, this.currentPageUrl())) return;
+        // the zoom took the gesture: undo any swipe it started as
+        this.swiperInstance.slideTo(this.swiperInstance.activeIndex, 0);
+    }
+
+    onPointerMove(e) {
+        this.pageZoom?.onPointerMove(e);
+    }
+
+    onPointerUp(e) {
+        this.pageZoom?.onPointerUp(e);
+    }
+
+    onDoubleClick(e) {
+        if (this.swiperInstance) this.pageZoom?.onDoubleClick(e, this.currentPageUrl());
+    }
+
+    onResize() {
+        this.pageZoom?.onResize();
+    }
+
+    onZoomActiveChange(active) {
+        if (!this.swiperInstance) return;
+        this.swiperInstance.allowTouchMove = !active;
+        if (!active && this.swiperInstance.activeIndex !== this.currentPage) {
+            this.swiperInstance.slideTo(this.currentPage, 0);
+        }
+    }
+
+    toggleZoom() {
+        if (this.swiperInstance) this.pageZoom?.toggle(this.currentPageUrl());
     }
 
     toggleFullscreen() {
-        setTimeout(() => this.swiperInstance?.update(), 200);
+        setTimeout(() => {
+            this.swiperInstance?.update();
+            this.pageZoom?.onResize();
+        }, 200);
     }
 
     createMediaElement(options) {
@@ -282,19 +396,12 @@ export class ComicsPlayer {
                 this.currentPage = options.startPositionTicks / 10000 || 0;
                 this.currentSrc = () => downloadUrl;
 
-                this.swiperInstance = new Swiper(elem.querySelector('.slideshowSwiperContainer'), {
+                const container = elem.querySelector('.slideshowSwiperContainer');
+                this.swiperInstance = new Swiper(container, {
                     direction: 'horizontal',
                     // loop is disabled due to the lack of Swiper support in virtual slides
                     loop: false,
-                    zoom: {
-                        minRatio: 1,
-                        toggle: true,
-                        containerClass: 'slider-zoom-container'
-                    },
                     autoplay: false,
-                    keyboard: {
-                        enabled: true
-                    },
                     preloadImages: true,
                     slidesPerView: this.comicsPlayerSettings.pagesPerView,
                     slidesPerGroup: this.comicsPlayerSettings.pagesPerView,
@@ -317,25 +424,47 @@ export class ComicsPlayer {
 
                 // save current page ( a page is an image file inside the archive )
                 this.swiperInstance.on('slideChange', () => {
+                    // while zoomed in the zoom turns the pages, one at a time
+                    if (this.pageZoom?.active) return;
                     this.currentPage = this.swiperInstance.activeIndex;
                     Events.trigger(this, 'pause');
                 });
+
+                this.pageZoom = new PageZoom(container);
+                this.pageZoom.onActiveChange = active => this.onZoomActiveChange(active);
+                this.bindZoomEvents(container);
             });
     }
 
     next() {
-        this.swiperInstance?.slideNext();
+        if (this.pageZoom?.active) {
+            this.turnZoomedPage(1);
+        } else {
+            this.swiperInstance?.slideNext();
+        }
     }
 
     previous() {
-        this.swiperInstance?.slidePrev();
+        if (this.pageZoom?.active) {
+            this.turnZoomedPage(-1);
+        } else {
+            this.swiperInstance?.slidePrev();
+        }
+    }
+
+    turnZoomedPage(step) {
+        const page = this.currentPage + step;
+        if (page < 0 || page >= this.pageCount) return;
+        this.currentPage = page;
+        this.pageZoom.setPage(this.currentPageUrl());
+        // keep the page number below in step
+        this.swiperInstance.slideTo(page, 0);
+        Events.trigger(this, 'pause');
     }
 
     getImgFromUrl(url) {
         return `<div class="swiper-slide">
-                   <div class="slider-zoom-container">
-                       <img src="${url}" class="swiper-slide-img">
-                   </div>
+                   <img src="${url}" class="swiper-slide-img" draggable="false">
                </div>`;
     }
 

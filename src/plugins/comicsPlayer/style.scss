@@ -7,11 +7,34 @@
         height: 100%;
         top: env(safe-area-inset-top);
         height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+        // pinches and drags are handled by the page zoom
+        touch-action: none;
     }
 
-    .slider-zoom-container {
-        text-align: center;
-        height: 100%;
+    .comicsPageZoom {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        overflow: hidden;
+        background: inherit;
+        cursor: grab;
+
+        &:active {
+            cursor: grabbing;
+        }
+    }
+
+    .comicsPageZoomImg {
+        position: absolute;
+        top: 0;
+        left: 0;
+        max-width: none;
+        transform-origin: 0 0;
+        user-select: none;
+    }
+
+    .comicsPageZoomEase {
+        transition: transform 160ms ease-in-out;
     }
 
     .swiper-slide-img {
