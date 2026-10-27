@@ -18,6 +18,7 @@ interface BookOsdProps {
     onIncreaseFontSize?: () => void;
     onToggleDirection?: () => void;
     onToggleLayout?: () => void;
+    onToggleFitWidth?: () => void;
     onToggleFullscreen: () => void;
 }
 
@@ -37,6 +38,7 @@ const BookOsd: FC<BookOsdProps> = ({
     onIncreaseFontSize,
     onToggleDirection,
     onToggleLayout,
+    onToggleFitWidth,
     onToggleFullscreen
 }) => {
     const settings = userSettings.getComicsPlayerSettings(item.Id!) as ComicsPlayerSettings;
@@ -161,6 +163,14 @@ const BookOsd: FC<BookOsdProps> = ({
                         onClick={onClickLayout}
                         icon={layout ? 'import_contacts' : 'devices_fold'}
                         title={globalize.translate(layout ? 'ViewDoublePage' : 'ViewSinglePage')}
+                    />
+                )}
+
+                {onToggleFitWidth && (
+                    <IconButton
+                        onClick={onToggleFitWidth}
+                        icon='width_full'
+                        title={globalize.translate('FitToWidth')}
                     />
                 )}
 

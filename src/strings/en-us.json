@@ -370,6 +370,7 @@
     "FileReadError": "An error occurred while reading the file.",
     "Filter": "Filter",
     "Filters": "Filters",
+    "FitToWidth": "Fit to width",
     "Folders": "Folders",
     "FormatValue": "Format: {0}",
     "Framerate": "Framerate",

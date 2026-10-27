@@ -39,6 +39,7 @@ export class ComicsPlayer {
         this.onDialogClosed = this.onDialogClosed.bind(this);
         this.onWindowKeyDown = this.onWindowKeyDown.bind(this);
         this.toggleFullscreen = this.toggleFullscreen.bind(this);
+        this.toggleFitWidth = this.toggleFitWidth.bind(this);
         this.onWheel = this.onWheel.bind(this);
         this.onPointerDown = this.onPointerDown.bind(this);
         this.onPointerMove = this.onPointerMove.bind(this);
@@ -201,7 +202,9 @@ export class ComicsPlayer {
         switch (key) {
             case 'Escape':
                 e.preventDefault();
-                if (this.pageZoom?.active) {
+                if (this.pageZoom?.fitWidth) {
+                    this.toggleFitWidth();
+                } else if (this.pageZoom?.active) {
                     this.pageZoom.close();
                 } else {
                     this.stop();
@@ -222,6 +225,10 @@ export class ComicsPlayer {
             case 'PageUp':
                 e.preventDefault();
                 this.previous();
+                break;
+            case 'Space':
+                e.preventDefault();
+                this.toggleFitWidth();
                 break;
             case 'KeyM':
                 this.toggleZoom();
@@ -307,6 +314,10 @@ export class ComicsPlayer {
         if (this.swiperInstance) this.pageZoom?.toggle(this.currentPageUrl());
     }
 
+    toggleFitWidth() {
+        if (this.swiperInstance) this.pageZoom?.toggleFitWidth(this.currentPageUrl());
+    }
+
     toggleFullscreen() {
         setTimeout(() => {
             this.swiperInstance?.update();
@@ -349,6 +360,7 @@ export class ComicsPlayer {
             onNext: this.next,
             onToggleDirection: this.onDirChanged,
             onToggleLayout: this.onViewChanged,
+            onToggleFitWidth: this.toggleFitWidth,
             onToggleFullscreen: this.toggleFullscreen
         }, elem.querySelector('#bookOsdMount'));
 
