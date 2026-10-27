@@ -94,15 +94,20 @@ const BookOsd: FC<BookOsdProps> = ({
             setVisible(state => !state);
         };
 
+        // full screen can also be left with Esc or entered with a key
+        const onFullscreenChange = () => setFullscreen(Screenfull.isFullscreen);
+
         scheduleHide();
         document.addEventListener('pointermove', onPointerMove);
         document.addEventListener('click', onClick);
+        if (Screenfull.isEnabled) Screenfull.on('change', onFullscreenChange);
 
         return () => {
             clearTimeout(timeout.current);
             updateFullscreen(false);
             document.removeEventListener('pointermove', onPointerMove);
             document.removeEventListener('click', onClick);
+            if (Screenfull.isEnabled) Screenfull.off('change', onFullscreenChange);
         };
     }, [scheduleHide, updateFullscreen]);
 

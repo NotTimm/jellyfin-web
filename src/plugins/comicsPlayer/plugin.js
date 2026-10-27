@@ -1,5 +1,6 @@
 import { getLibraryApi } from '@jellyfin/sdk/lib/utils/api/library-api';
 import { Archive } from 'libarchive.js';
+import Screenfull from 'screenfull';
 
 import { PluginType } from 'constants/pluginType';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
@@ -232,6 +233,12 @@ export class ComicsPlayer {
                 break;
             case 'KeyM':
                 this.toggleZoom();
+                break;
+            case 'KeyF':
+                if (Screenfull.isEnabled) {
+                    Screenfull.toggle();
+                    this.toggleFullscreen();
+                }
                 break;
         }
     }
