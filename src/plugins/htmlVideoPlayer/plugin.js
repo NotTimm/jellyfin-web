@@ -322,6 +322,11 @@ export class HtmlVideoPlayer {
      */
     #mediaElement;
     /**
+     * State of an open Document Picture-in-Picture window, if any.
+     * @type {{ window: Window, placeholder: Comment, cleanup: () => void } | null}
+     */
+    #documentPip = null;
+    /**
      * @type {number}
      */
     #fetchQueue = 0;
@@ -960,6 +965,9 @@ export class HtmlVideoPlayer {
     destroy() {
         this.setSubtitleOffset.cancel();
 
+        // Bring the player back into the main document before tearing it down
+        this.exitDocumentPictureInPicture();
+
         destroyHlsPlayer(this);
         destroyFlvPlayer(this);
 
@@ -1545,7 +1553,8 @@ export class HtmlVideoPlayer {
             const subtitleVerticalPosition = parseInt(subtitleAppearance.verticalPosition, 10);
 
             if (!this.#videoSubtitlesElem && !this.isSecondaryTrack(targetTextTrackIndex)) {
-                let subtitlesContainer = document.querySelector('.videoSubtitles');
+                // Query the video's own document: it may live in a Document Picture-in-Picture window
+                let subtitlesContainer = videoElement.ownerDocument.querySelector('.videoSubtitles');
                 if (!subtitlesContainer) {
                     subtitlesContainer = document.createElement('div');
                     subtitlesContainer.classList.add('videoSubtitles');
@@ -1558,7 +1567,7 @@ export class HtmlVideoPlayer {
                 videoElement.parentNode.appendChild(subtitlesContainer);
                 this.#currentTrackEvents = subtitleData.TrackEvents;
             } else if (!this.#videoSecondarySubtitlesElem && this.isSecondaryTrack(targetTextTrackIndex)) {
-                const subtitlesContainer = document.querySelector('.videoSubtitles');
+                const subtitlesContainer = videoElement.ownerDocument.querySelector('.videoSubtitles');
                 if (!subtitlesContainer) return;
                 const secondarySubtitlesElement = document.createElement('div');
                 secondarySubtitlesElement.classList.add('videoSecondarySubtitlesInner');
@@ -1787,7 +1796,8 @@ export class HtmlVideoPlayer {
      * @private
      */
     createMediaElement(options) {
-        const dlg = document.querySelector('.videoPlayerContainer');
+        const dlg = document.querySelector('.videoPlayerContainer')
+            || this.#documentPip?.window.document.querySelector('.videoPlayerContainer');
 
         if (!dlg) {
             return import('./style.scss').then(() => {
@@ -1940,6 +1950,7 @@ export class HtmlVideoPlayer {
             typeof video.webkitSupportsPresentationMode === 'function' && video.webkitSupportsPresentationMode('picture-in-picture') && typeof video.webkitSetPresentationMode === 'function'
             // Check standard PiP support
             || document.pictureInPictureEnabled
+            || HtmlVideoPlayer.supportsDocumentPictureInPicture()
         ) {
             list.push('PictureInPicture');
         }
@@ -2010,8 +2021,212 @@ export class HtmlVideoPlayer {
         console.error(`Picture in picture error: ${err}`);
     }
 
+    /**
+     * Whether the browser supports the Document Picture-in-Picture API (Chromium 116+).
+     * @private
+     */
+    static supportsDocumentPictureInPicture() {
+        return typeof window.documentPictureInPicture?.requestWindow === 'function';
+    }
+
+    /**
+     * Whether the current subtitles are drawn by us in the DOM (libass, PGS, or custom text
+     * rendering) rather than by the browser. Native picture-in-picture only carries the raw
+     * video frames, so these subtitles are lost unless we use Document Picture-in-Picture.
+     * @private
+     */
+    hasCustomRenderedSubtitles() {
+        return !!(this.#currentAssRenderer || this.#currentBitmapSubRenderer || this.#videoSubtitlesElem);
+    }
+
+    /**
+     * @private
+     */
+    resizeCustomRenderedSubtitles() {
+        this.#currentAssRenderer?.resize();
+        this.#currentBitmapSubRenderer?.updateCanvasSize?.();
+    }
+
+    /**
+     * Copies the page's stylesheets into the picture-in-picture window, which starts unstyled.
+     * @private
+     * @param {Document} pipDocument
+     */
+    static syncDocumentPictureInPictureStyles(pipDocument) {
+        pipDocument.head.querySelectorAll('[data-pip-style]').forEach(node => {
+            node.remove();
+        });
+
+        for (const sheet of document.styleSheets) {
+            if (sheet.disabled) continue;
+
+            let node;
+            if (sheet.href) {
+                // Link external sheets so relative url()s (fonts, images) keep resolving
+                node = pipDocument.createElement('link');
+                node.rel = 'stylesheet';
+                node.href = sheet.href;
+            } else {
+                try {
+                    node = pipDocument.createElement('style');
+                    node.textContent = Array.from(sheet.cssRules, rule => rule.cssText).join('\n');
+                } catch (err) {
+                    console.debug('[htmlVideoPlayer] unable to copy stylesheet to picture-in-picture window', err);
+                    continue;
+                }
+            }
+
+            if (sheet.media?.mediaText) {
+                node.media = sheet.media.mediaText;
+            }
+            node.setAttribute('data-pip-style', '');
+            pipDocument.head.appendChild(node);
+        }
+    }
+
+    /**
+     * Opens a Document Picture-in-Picture window and moves the whole player container (video plus
+     * the subtitle canvases/elements) into it, so custom-rendered subtitles stay visible.
+     * Must be called synchronously from a user gesture.
+     * @private
+     */
+    async enterDocumentPictureInPicture() {
+        const dlg = this.#videoDialog;
+        const video = this.#mediaElement;
+        if (!dlg || !video || this.#documentPip) return;
+
+        const aspectRatio = video.videoWidth && video.videoHeight ? video.videoHeight / video.videoWidth : 9 / 16;
+        const width = 480;
+
+        const pipWindow = await window.documentPictureInPicture.requestWindow({
+            width,
+            height: Math.round(width * aspectRatio)
+        });
+
+        // Playback may have stopped, or the player changed, while the window was opening
+        if (this.#videoDialog !== dlg || this.#documentPip) {
+            pipWindow.close();
+            return;
+        }
+
+        const pipDocument = pipWindow.document;
+        pipDocument.title = document.title;
+        pipDocument.documentElement.style.background = '#000';
+        pipDocument.body.style.margin = '0';
+        pipDocument.body.style.background = '#000';
+        pipDocument.body.style.overflow = 'hidden';
+        HtmlVideoPlayer.syncDocumentPictureInPictureStyles(pipDocument);
+
+        // Keep the copied styles current (lazy-loaded chunks, cue styles, theme changes)
+        const syncStyles = debounce(() => HtmlVideoPlayer.syncDocumentPictureInPictureStyles(pipDocument), 100);
+        const styleObserver = new MutationObserver(syncStyles);
+        styleObserver.observe(document.head, { childList: true, subtree: true, characterData: true });
+
+        // HACK: libass-wasm 4.2.4 schedules rendering with the main window's requestAnimationFrame,
+        // which browsers pause while the Jellyfin tab is hidden, freezing the subtitles in the popout.
+        // Route animation frames through the picture-in-picture window while it is open, and hand any
+        // still-pending callbacks back to the main window when it closes so render loops keep going.
+        const mainRequestAnimationFrame = window.requestAnimationFrame;
+        const mainCancelAnimationFrame = window.cancelAnimationFrame;
+        const pendingFrames = new Map();
+        window.requestAnimationFrame = (callback) => {
+            const id = pipWindow.requestAnimationFrame((time) => {
+                pendingFrames.delete(id);
+                callback(time);
+            });
+            pendingFrames.set(id, callback);
+            return id;
+        };
+        window.cancelAnimationFrame = (id) => {
+            if (pendingFrames.delete(id)) {
+                pipWindow.cancelAnimationFrame(id);
+            } else {
+                mainCancelAnimationFrame.call(window, id);
+            }
+        };
+
+        const onResize = () => this.resizeCustomRenderedSubtitles();
+        const onPageHide = () => this.exitDocumentPictureInPicture();
+        pipWindow.addEventListener('resize', onResize);
+        pipWindow.addEventListener('pagehide', onPageHide);
+
+        const placeholder = document.createComment('video player is in picture-in-picture');
+        dlg.parentNode.insertBefore(placeholder, dlg);
+        pipDocument.body.appendChild(dlg);
+
+        this.#documentPip = {
+            window: pipWindow,
+            placeholder,
+            cleanup: () => {
+                syncStyles.cancel();
+                styleObserver.disconnect();
+                pipWindow.removeEventListener('resize', onResize);
+                pipWindow.removeEventListener('pagehide', onPageHide);
+
+                window.requestAnimationFrame = mainRequestAnimationFrame;
+                window.cancelAnimationFrame = mainCancelAnimationFrame;
+                pendingFrames.forEach((callback, id) => {
+                    try {
+                        pipWindow.cancelAnimationFrame(id);
+                    } catch {
+                        // The window may already be gone
+                    }
+                    mainRequestAnimationFrame.call(window, callback);
+                });
+                pendingFrames.clear();
+            }
+        };
+
+        // ResizeObserver/resize listeners set up by the renderers belong to the main window and
+        // don't fire for the popout, so resize the subtitles explicitly once the move has laid out
+        mainRequestAnimationFrame.call(window, onResize);
+        setTimeout(onResize, 100);
+    }
+
+    /**
+     * Moves the player back into the main document and closes the Document Picture-in-Picture window.
+     * Safe to call when no window is open.
+     * @private
+     */
+    exitDocumentPictureInPicture() {
+        const pip = this.#documentPip;
+        if (!pip) return;
+        this.#documentPip = null;
+
+        pip.cleanup();
+
+        const dlg = this.#videoDialog;
+        if (dlg && dlg.ownerDocument !== document) {
+            if (pip.placeholder.parentNode) {
+                pip.placeholder.parentNode.insertBefore(dlg, pip.placeholder);
+            } else {
+                document.body.insertBefore(dlg, document.body.firstChild);
+            }
+        }
+        pip.placeholder.remove();
+
+        if (!pip.window.closed) {
+            pip.window.close();
+        }
+
+        this.resizeCustomRenderedSubtitles();
+    }
+
     setPictureInPictureEnabled(isEnabled) {
         const video = this.#mediaElement;
+
+        if (!isEnabled && this.#documentPip) {
+            this.exitDocumentPictureInPicture();
+            return;
+        }
+
+        if (isEnabled && video && HtmlVideoPlayer.supportsDocumentPictureInPicture() && this.hasCustomRenderedSubtitles()) {
+            if (document.pictureInPictureElement) {
+                document.exitPictureInPicture().catch(HtmlVideoPlayer.onPictureInPictureError);
+            }
+            this.enterDocumentPictureInPicture().catch(HtmlVideoPlayer.onPictureInPictureError);
+            return;
+        }
 
         if (document.pictureInPictureEnabled) {
             if (video) {
@@ -2027,6 +2242,10 @@ export class HtmlVideoPlayer {
     }
 
     isPictureInPictureEnabled() {
+        if (this.#documentPip) {
+            return true;
+        }
+
         if (document.pictureInPictureEnabled) {
             return !!document.pictureInPictureElement;
         } else if (window.Windows) {
